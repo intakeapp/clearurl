@@ -94,7 +94,6 @@ func (p *Provider) initUrlPattern() error {
 
 type Handler struct {
 	providers map[string]*Provider
-	global    *Provider
 }
 
 func Init() (*Handler, error) {
@@ -109,22 +108,11 @@ func Init() (*Handler, error) {
 		}
 	}
 
-	h.global = h.providers["globalRules"]
-	delete(h.providers, "globalRules")
-
 	return h, nil
 }
 
 func (h *Handler) Preload() error {
-	ps := make([]*Provider, len(h.providers)+1)
-	i := 0
 	for _, p := range h.providers {
-		ps[i] = p
-		i++
-	}
-	ps[len(ps)-1] = h.global
-
-	for _, p := range ps {
 		if err := p.initExceptions(); err != nil {
 			return err
 		}
@@ -140,69 +128,60 @@ func (h *Handler) Preload() error {
 }
 
 func (h *Handler) Clear(rawURL string) (string, error) {
-	if rawURL == "" {
-		return "", nil
-	}
-
-	var provider *Provider
-	for _, p := range h.providers {
-		if p.urlPatternRegexp.MatchString(rawURL) {
-			provider = p
-			break
-		}
-	}
-
-	if provider == nil {
-		provider = h.global
-	}
-
-	if provider.CompleteProvider {
-		return rawURL, nil
-	}
-
-	if err := provider.initExceptions(); err != nil {
-		return "", err
-	}
-
-	for _, e := range provider.exceptionsRegexps {
-		if e.MatchString(rawURL) {
-			return rawURL, nil
-		}
-	}
-
-	if err := provider.initRawRules(); err != nil {
-		return "", err
-	}
-
-	for _, r := range provider.rawRulesRegexps {
-		rawURL = r.ReplaceAllString(rawURL, "")
-	}
-
-	u, err := url.Parse(rawURL)
+	cleanedURL := rawURL
+	u, err := url.Parse(cleanedURL)
 	if err != nil {
 		return "", err
 	}
+	values := u.Query()
 
-	if err := provider.initRules(); err != nil {
-		return "", err
-	}
+	for _, p := range h.providers {
+		if !p.urlPatternRegexp.MatchString(rawURL) || p.CompleteProvider {
+			continue
+		}
 
-	values := url.Values{}
-	for k, vs := range u.Query() {
-		remove := false
-		for _, rule := range provider.rulesRegexps {
-			if rule.MatchString(strings.ToLower(k)) {
-				remove = true
+		if err := p.initExceptions(); err != nil {
+			return "", err
+		}
+
+		isException := false
+		for _, e := range p.exceptionsRegexps {
+			if e.MatchString(rawURL) {
+				isException = true
 				break
 			}
 		}
-		if !remove {
-			for _, v := range vs {
-				values.Add(k, v)
+		if isException {
+			continue
+		}
+
+		if err := p.initRawRules(); err != nil {
+			return "", err
+		}
+
+		for _, r := range p.rawRulesRegexps {
+			cleanedURL = r.ReplaceAllString(cleanedURL, "")
+		}
+
+		if err := p.initRules(); err != nil {
+			return "", err
+		}
+
+		for k := range values {
+			remove := false
+			for _, rule := range p.rulesRegexps {
+				if rule.MatchString(strings.ToLower(k)) {
+					remove = true
+					break
+				}
+			}
+			if remove {
+				values.Del(k)
 			}
 		}
 	}
 
+	u, _ = url.Parse(cleanedURL)
 	u.RawQuery = values.Encode()
 	return u.String(), nil
 }
